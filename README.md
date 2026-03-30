@@ -1,6 +1,6 @@
-# 🚀 AI Audience Mentor
+# 🚀 AI Reverse Learning
 
-AI Audience Mentor helps you practice explanations and presentations with an AI audience that adapts to **beginner, intermediate, or expert listeners**. It simulates real audience behavior and provides intelligent feedback on your delivery, clarity, and engagement.
+AI Reverse Learning helps you practice explanations and presentations with an AI audience that adapts to **beginner, intermediate, or expert listeners**. It simulates real audience behavior and provides intelligent feedback on your delivery, clarity, and engagement.
 
 ---
 
