@@ -29,11 +29,12 @@ from pydub.silence import split_on_silence
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
+
 logging.basicConfig(filename="debug.log", level=logging.DEBUG)
 
 app = Flask(__name__, static_folder="dist", static_url_path="/")
 CORS(app)
-load_dotenv()
+load_dotenv(override=True)
 
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
@@ -41,9 +42,15 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "app_data.db"))
 
-LLM_API_KEY = os.getenv("OPENAI_API_KEY")
-LLM_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-LLM_BASE_URL = os.getenv("OPENAI_BASE_URL")
+LLM_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+LLM_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+LLM_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "").strip()
+
+print("OPENAI_API_KEY set:", bool(LLM_API_KEY))
+print("OPENAI_MODEL:", repr(LLM_MODEL))
+print("API key prefix from app:", LLM_API_KEY[:12] if LLM_API_KEY else None)
+print("Model from app:", LLM_MODEL)
+print("OPENAI_BASE_URL:", repr(LLM_BASE_URL))
 
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
@@ -333,9 +340,17 @@ def update_explain_session(session_id: str, update_data: dict[str, Any]) -> None
 def get_llm_client() -> OpenAI:
     if not LLM_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
+
     kwargs: dict[str, Any] = {"api_key": LLM_API_KEY}
+
     if LLM_BASE_URL:
+        if not LLM_BASE_URL.startswith(("http://", "https://")):
+            raise RuntimeError(
+                f"OPENAI_BASE_URL is invalid: {LLM_BASE_URL!r}. "
+                "It must start with http:// or https://"
+            )
         kwargs["base_url"] = LLM_BASE_URL
+
     return OpenAI(**kwargs)
 
 
@@ -352,14 +367,22 @@ def extract_json_object(raw: str) -> dict[str, Any]:
 
 def chat_completion(messages: list[dict[str, str]], max_tokens: int) -> str:
     client = get_llm_client()
-    response = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=messages,
-        temperature=0,
-        max_tokens=max_tokens,
-    )
-    return (response.choices[0].message.content or "").strip()
 
+    print("Calling model:", LLM_MODEL)
+    print("Base URL:", repr(LLM_BASE_URL))
+    print("API key present:", bool(LLM_API_KEY))
+
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            temperature=0,
+            max_tokens=max_tokens,
+        )
+        return (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        print("chat_completion failed:", repr(e))
+        raise
 
 def get_whisper_model() -> WhisperModel:
     global whisper_model
@@ -966,6 +989,7 @@ def serve_frontend(path: str):
     if path and target.exists():
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, "index.html")
+
 
 
 if __name__ == "__main__":

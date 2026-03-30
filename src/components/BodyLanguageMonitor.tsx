@@ -14,32 +14,57 @@ interface BodyLanguageMonitorProps {
   onMetricsChange: (metrics: BodyMetrics | null) => void;
 }
 
-const MIN_GESTURE_INTERVAL_MS = 900;
-const MIN_NOD_INTERVAL_MS = 700;
+const MIN_GESTURE_INTERVAL_MS = 1000;
+const MIN_NOD_INTERVAL_MS = 900;
+const LANDMARK_SMOOTHING = 0.65;
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
 
-const buildSuggestions = (postureScore: number, handGestureRate: number, headNodCount: number) => {
+const distance2D = (a: any, b: any) => {
+  if (!a || !b) return 0;
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+};
+
+const midpoint = (a: any, b: any) => ({
+  x: (a.x + b.x) / 2,
+  y: (a.y + b.y) / 2,
+});
+
+const smoothValue = (prev: number | null, next: number, alpha = LANDMARK_SMOOTHING) => {
+  if (prev === null) return next;
+  return prev * alpha + next * (1 - alpha);
+};
+
+const buildSuggestions = (
+  postureScore: number,
+  handGestureRate: number,
+  headNodCount: number
+) => {
   const suggestions: string[] = [];
 
-  if (postureScore < 70) {
-    suggestions.push('Try to keep your shoulders level and stay more upright.');
+  if (postureScore < 60) {
+    suggestions.push('Sit or stand taller, keep your shoulders level, and center your head.');
+  } else if (postureScore < 80) {
+    suggestions.push('Your posture is decent, but try to stay a little more upright and balanced.');
   } else {
-    suggestions.push('Your posture looks steady. Keep that balanced stance.');
+    suggestions.push('Your posture looks strong and steady.');
   }
 
-  if (handGestureRate < 6) {
-    suggestions.push('Use a few more deliberate hand gestures to support key points.');
-  } else if (handGestureRate > 30) {
-    suggestions.push('Your hands are active. Slow the gestures down so they feel intentional.');
+  if (handGestureRate < 4) {
+    suggestions.push('Use a few more intentional hand gestures to emphasize key ideas.');
+  } else if (handGestureRate > 16) {
+    suggestions.push('Your gestures are a bit frequent. Slow them down to feel more deliberate.');
   } else {
-    suggestions.push('Your hand gestures are in a healthy range for presentation practice.');
+    suggestions.push('Your gesture rate looks natural and supportive.');
   }
 
-  if (headNodCount > 18) {
-    suggestions.push('You are nodding often. Pause the head movement so the delivery feels calmer.');
+  if (headNodCount > 10) {
+    suggestions.push('You are nodding quite often. Reduce repeated head movement for a calmer delivery.');
   } else {
-    suggestions.push('Head movement looks controlled and should not distract the audience.');
+    suggestions.push('Your head movement looks controlled.');
   }
 
   return suggestions;
@@ -51,14 +76,24 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
   const streamRef = useRef<MediaStream | null>(null);
   const cameraRef = useRef<any>(null);
   const holisticRef = useRef<any>(null);
+
   const startedAtRef = useRef<number>(0);
   const gestureCountRef = useRef<number>(0);
   const nodCountRef = useRef<number>(0);
   const postureSamplesRef = useRef<number>(0);
   const postureTotalRef = useRef<number>(0);
+
   const lastGestureAtRef = useRef<number>(0);
   const lastNodAtRef = useRef<number>(0);
-  const lastNoseYRef = useRef<number | null>(null);
+
+  const smoothedNoseYRef = useRef<number | null>(null);
+  const prevSmoothedNoseYRef = useRef<number | null>(null);
+
+  const leftHandAnchorRef = useRef<any>(null);
+  const rightHandAnchorRef = useRef<any>(null);
+
+  const nodStateRef = useRef<'neutral' | 'down'>('neutral');
+
   const [status, setStatus] = useState('Camera idle');
 
   useEffect(() => {
@@ -79,9 +114,7 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
       }
 
       const video = videoRef.current;
-      if (video) {
-        video.srcObject = null;
-      }
+      if (video) video.srcObject = null;
 
       const canvas = canvasRef.current;
       if (canvas) {
@@ -119,7 +152,12 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
         postureTotalRef.current = 0;
         lastGestureAtRef.current = 0;
         lastNodAtRef.current = 0;
-        lastNoseYRef.current = null;
+
+        smoothedNoseYRef.current = null;
+        prevSmoothedNoseYRef.current = null;
+        leftHandAnchorRef.current = null;
+        rightHandAnchorRef.current = null;
+        nodStateRef.current = 'neutral';
 
         const video = videoRef.current;
         const canvas = canvasRef.current;
@@ -131,7 +169,7 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
         await video.play();
 
         const holistic = new Holistic({
-          locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`,
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`,
         });
         holisticRef.current = holistic;
 
@@ -144,14 +182,10 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
         });
 
         holistic.onResults((results: any) => {
-          if (!canvasRef.current || !videoRef.current) {
-            return;
-          }
+          if (!canvasRef.current || !videoRef.current) return;
 
           const ctx = canvasRef.current.getContext('2d');
-          if (!ctx) {
-            return;
-          }
+          if (!ctx) return;
 
           const width = videoRef.current.videoWidth || 640;
           const height = videoRef.current.videoHeight || 360;
@@ -164,44 +198,122 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
 
           const now = Date.now();
 
+          // ------------------------
+          // SMARTER POSTURE SCORING
+          // ------------------------
           if (results.poseLandmarks) {
-            const leftShoulder = results.poseLandmarks[11];
-            const rightShoulder = results.poseLandmarks[12];
-            const nose = results.poseLandmarks[0];
+            const pose = results.poseLandmarks;
+            const nose = pose[0];
+            const leftShoulder = pose[11];
+            const rightShoulder = pose[12];
+            const leftHip = pose[23];
+            const rightHip = pose[24];
 
-            if (leftShoulder && rightShoulder) {
-              const posture = clamp(100 - (Math.abs(leftShoulder.y - rightShoulder.y) / 0.12) * 100, 0, 100);
+            if (leftShoulder && rightShoulder && leftHip && rightHip && nose) {
+              const shoulderMid = midpoint(leftShoulder, rightShoulder);
+              const hipMid = midpoint(leftHip, rightHip);
+
+              const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y); // smaller is better
+              const torsoOffsetX = Math.abs(shoulderMid.x - hipMid.x); // smaller is better
+              const headOffsetX = Math.abs(nose.x - shoulderMid.x); // centered head is better
+
+              const shoulderScore = clamp(100 - (shoulderTilt / 0.10) * 100, 0, 100);
+              const torsoScore = clamp(100 - (torsoOffsetX / 0.12) * 100, 0, 100);
+              const headScore = clamp(100 - (headOffsetX / 0.10) * 100, 0, 100);
+
+              const posture =
+                Math.round(shoulderScore * 0.45 + torsoScore * 0.35 + headScore * 0.20);
+
               postureSamplesRef.current += 1;
               postureTotalRef.current += posture;
 
-              ctx.strokeStyle = posture > 70 ? '#10b981' : '#f59e0b';
+              ctx.strokeStyle = posture > 75 ? '#10b981' : posture > 55 ? '#f59e0b' : '#ef4444';
               ctx.lineWidth = 3;
               ctx.beginPath();
               ctx.moveTo(leftShoulder.x * width, leftShoulder.y * height);
               ctx.lineTo(rightShoulder.x * width, rightShoulder.y * height);
               ctx.stroke();
+
+              ctx.beginPath();
+              ctx.moveTo(shoulderMid.x * width, shoulderMid.y * height);
+              ctx.lineTo(hipMid.x * width, hipMid.y * height);
+              ctx.stroke();
             }
 
+            // ------------------------
+            // SMARTER NOD DETECTION
+            // ------------------------
             if (nose) {
-              if (
-                lastNoseYRef.current !== null &&
-                lastNoseYRef.current - nose.y > 0.03 &&
-                now - lastNodAtRef.current > MIN_NOD_INTERVAL_MS
-              ) {
-                nodCountRef.current += 1;
-                lastNodAtRef.current = now;
+              const smoothed = smoothValue(smoothedNoseYRef.current, nose.y);
+              prevSmoothedNoseYRef.current = smoothedNoseYRef.current;
+              smoothedNoseYRef.current = smoothed;
+
+              if (prevSmoothedNoseYRef.current !== null) {
+                const deltaY = smoothed - prevSmoothedNoseYRef.current;
+
+                // down motion
+                if (deltaY > 0.008 && nodStateRef.current === 'neutral') {
+                  nodStateRef.current = 'down';
+                }
+
+                // up return completes nod
+                if (
+                  deltaY < -0.008 &&
+                  nodStateRef.current === 'down' &&
+                  now - lastNodAtRef.current > MIN_NOD_INTERVAL_MS
+                ) {
+                  nodCountRef.current += 1;
+                  lastNodAtRef.current = now;
+                  nodStateRef.current = 'neutral';
+                }
               }
-              lastNoseYRef.current = nose.y;
             }
           }
 
-          if ((results.leftHandLandmarks || results.rightHandLandmarks) && now - lastGestureAtRef.current > MIN_GESTURE_INTERVAL_MS) {
+          // ------------------------
+          // SMARTER GESTURE DETECTION
+          // ------------------------
+          const detectHandGesture = (handLandmarks: any, anchorRef: React.MutableRefObject<any>) => {
+            if (!handLandmarks || handLandmarks.length === 0) return false;
+
+            const wrist = handLandmarks[0];
+            const indexTip = handLandmarks[8];
+            const pinkyTip = handLandmarks[20];
+
+            if (!wrist || !indexTip || !pinkyTip) return false;
+
+            const handCenter = {
+              x: (wrist.x + indexTip.x + pinkyTip.x) / 3,
+              y: (wrist.y + indexTip.y + pinkyTip.y) / 3,
+            };
+
+            if (!anchorRef.current) {
+              anchorRef.current = handCenter;
+              return false;
+            }
+
+            const motion = distance2D(handCenter, anchorRef.current);
+            anchorRef.current = {
+              x: anchorRef.current.x * 0.7 + handCenter.x * 0.3,
+              y: anchorRef.current.y * 0.7 + handCenter.y * 0.3,
+            };
+
+            return motion > 0.035;
+          };
+
+          const leftGesture = detectHandGesture(results.leftHandLandmarks, leftHandAnchorRef);
+          const rightGesture = detectHandGesture(results.rightHandLandmarks, rightHandAnchorRef);
+
+          if ((leftGesture || rightGesture) && now - lastGestureAtRef.current > MIN_GESTURE_INTERVAL_MS) {
             gestureCountRef.current += 1;
             lastGestureAtRef.current = now;
           }
 
+          // ------------------------
+          // METRICS + UI
+          // ------------------------
           ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
-          ctx.fillRect(12, 12, 180, 72);
+          ctx.fillRect(12, 12, 205, 76);
           ctx.fillStyle = '#ffffff';
           ctx.font = '14px sans-serif';
 
@@ -211,6 +323,7 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
             : 0;
           const handGestureRate = Math.round(gestureCountRef.current / elapsedMinutes);
           const headNodCount = Math.round(nodCountRef.current / elapsedMinutes);
+
           const metrics: BodyMetrics = {
             postureScore,
             handGestureRate,
@@ -235,6 +348,7 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
           width: 640,
           height: 360,
         });
+
         cameraRef.current = camera;
         await camera.start();
         setStatus('Camera active');
@@ -257,17 +371,8 @@ const BodyLanguageMonitor = ({ active, onMetricsChange }: BodyLanguageMonitorPro
   return (
     <div className="flex flex-col gap-2">
       <div className="relative overflow-hidden rounded-md bg-slate-950">
-        <video
-          ref={videoRef}
-          className="hidden"
-          autoPlay
-          muted
-          playsInline
-        />
-        <canvas
-          ref={canvasRef}
-          className="block h-48 w-full object-cover"
-        />
+        <video ref={videoRef} className="hidden" autoPlay muted playsInline />
+        <canvas ref={canvasRef} className="block h-48 w-full object-cover" />
       </div>
       <p className="text-xs text-gray-500">{status}</p>
     </div>

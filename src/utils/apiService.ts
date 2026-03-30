@@ -71,7 +71,16 @@ export const analyzeContent = async ({
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  if (!res.ok) throw new Error('Analysis failed');
+  if (!res.ok) {
+    let errorMessage = 'Analysis failed';
+    try {
+      const errorData = await res.json();
+      errorMessage = errorData.details || errorData.error || errorData.message || errorMessage;
+    } catch {
+      // Ignore JSON parse failures and fall back to the generic message.
+    }
+    throw new Error(errorMessage);
+  }
   return res.json() as Promise<{ message: string; feedback: Feedback }>;
 };
 
